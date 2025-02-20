@@ -1,0 +1,96 @@
+import sys
+import numpy as np
+import pandas as pd
+import sounddevice as sd
+from scipy.signal import butter, lfilter
+from pythonosc.udp_client import SimpleUDPClient
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel
+from PyQt5.QtCore import QTimer
+
+# Set up OSC client to send data to SuperCollider
+SC_IP = "127.0.0.1"  # SuperCollider should be running locally
+SC_PORT = 57120  # Default SuperCollider OSC port
+osc_client = SimpleUDPClient(SC_IP, SC_PORT)
+
+# Load OpenBCI EEG data (Assuming CSV format with multiple EEG channels)
+def load_eeg_data(file_path):
+    df = pd.read_csv(file_path)
+    return df
+
+def bandpass_filter(data, lowcut, highcut, fs, order=3):
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    return lfilter(b, a, data)
+
+class NeuroInstrument(QWidget):
+    def __init__(self, eeg_data, instrument_id):
+        super().__init__()
+        self.setWindowTitle(f"Neuro-Instrument {instrument_id}")
+        self.setGeometry(100 + instrument_id * 420, 100, 400, 300)
+        
+        layout = QVBoxLayout()
+        
+        self.theta_label = QLabel("Theta: 0.00")
+        self.gamma_label = QLabel("Gamma: 0.00")
+        self.delta_label = QLabel("Delta: 0.00")
+        
+        layout.addWidget(self.theta_label)
+        layout.addWidget(self.gamma_label)
+        layout.addWidget(self.delta_label)
+        
+        self.setLayout(layout)
+        
+        self.eeg_data = eeg_data
+        self.sample_index = 0
+        self.fs = 250  # OpenBCI sample rate
+        self.instrument_id = instrument_id
+        
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_eeg)
+        self.timer.start(500)
+    
+    def extract_band_power(self, data, lowcut, highcut):
+        filtered_data = bandpass_filter(data, lowcut, highcut, self.fs)
+        return np.mean(np.abs(filtered_data))
+    
+    def update_eeg(self):
+        if self.sample_index >= len(self.eeg_data):
+            self.sample_index = 0  # Loop data
+        
+        eeg_sample = self.eeg_data.iloc[self.sample_index]
+        self.sample_index += 1
+        
+        theta = self.extract_band_power(eeg_sample, 4, 8)
+        gamma = self.extract_band_power(eeg_sample, 30, 100)
+        delta = self.extract_band_power(eeg_sample, 0.5, 4)
+        
+        self.theta_label.setText(f"Theta: {theta:.2f}")
+        self.gamma_label.setText(f"Gamma: {gamma:.2f}")
+        self.delta_label.setText(f"Delta: {delta:.2f}")
+        
+        self.send_to_supercollider(theta, gamma, delta)
+    
+    def send_to_supercollider(self, theta, gamma, delta):
+        osc_client.send_message(f"/neuro/{self.instrument_id}/theta", theta)
+        osc_client.send_message(f"/neuro/{self.instrument_id}/gamma", gamma)
+        osc_client.send_message(f"/neuro/{self.instrument_id}/delta", delta)
+        print(f"Sent OSC: Instrument {self.instrument_id} -> Theta={theta}, Gamma={gamma}, Delta={delta}")
+
+if __name__ == "__main__":
+    eeg_file = "openbci_sample.csv"  # Replace with actual EEG data file
+    eeg_data = load_eeg_data(eeg_file)
+    
+    app = QApplication(sys.argv)
+    
+    # Assume multiple EEG channels as different instruments
+    num_instruments = min(4, len(eeg_data.columns))  # Max 4 instruments or limit by available channels
+    instruments = []
+    for i in range(num_instruments):
+        eeg_channel_data = eeg_data.iloc[:, i]  # Select EEG channel for each instrument
+        instrument = NeuroInstrument(pd.DataFrame(eeg_channel_data), i)
+        instrument.show()
+        instruments.append(instrument)
+    
+    sys.exit(app.exec_())
